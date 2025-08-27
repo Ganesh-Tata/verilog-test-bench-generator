@@ -63,24 +63,36 @@ def generate_truth_table(inputs, outputs, assigns):
     return df, waveform_df
 
 # ===============================
-# Generate block diagram
+# Professional block diagram
 # ===============================
 def generate_block_diagram(inputs, outputs, assigns):
-    dot = Digraph()
-    dot.attr(rankdir='LR')
+    dot = Digraph(comment='Verilog Block Diagram')
+    dot.attr(rankdir='LR', size='10')
 
-    for i in inputs:
-        dot.node(i, shape="circle", color="lightblue", style="filled")
+    # Input nodes (rank=source)
+    with dot.subgraph() as s:
+        s.attr(rank='source')
+        for i in inputs:
+            s.node(i, shape='circle', style='filled', color='lightblue')
 
-    for o in outputs:
-        dot.node(o, shape="doublecircle", color="lightgreen", style="filled")
+    # Output nodes (rank=sink)
+    with dot.subgraph() as s:
+        s.attr(rank='sink')
+        for o in outputs:
+            s.node(o, shape='doublecircle', style='filled', color='lightgreen')
 
+    # Logic nodes for assigns
     for out, expr in assigns:
-        dot.node(out + "_logic", expr, shape="box", color="orange", style="filled")
+        logic_name = out + "_logic"
+        dot.node(logic_name, label=expr, shape='box', style='filled', color='orange')
+
+        # Connect inputs used in expression to logic node
         for var in inputs:
             if var in expr:
-                dot.edge(var, out + "_logic")
-        dot.edge(out + "_logic", out)
+                dot.edge(var, logic_name)
+
+        # Connect logic node to output
+        dot.edge(logic_name, out)
 
     return dot
 
@@ -129,6 +141,32 @@ def fallback_testbench(inputs, outputs, assigns):
     return tb
 
 # ===============================
+# Plot digital waveforms clearly
+# ===============================
+def plot_waveforms(waveform_df):
+    fig, ax = plt.subplots(figsize=(12, 2 + len(waveform_df.columns)))
+
+    offset = 0
+    ticks = []
+    tick_labels = []
+
+    for sig in waveform_df.columns:
+        y = waveform_df[sig].replace("?", 0) + offset
+        ax.step(range(len(y)), y, where='post', linewidth=2)
+        ticks.append(offset + 0.5)
+        tick_labels.append(sig)
+        offset += 2  # space between signals
+
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(tick_labels)
+    ax.set_xlabel("Input Combination Index")
+    ax.set_title("Digital Waveforms")
+    ax.set_xlim(0, len(waveform_df))
+    ax.grid(True, which='both', linestyle='--', alpha=0.5)
+
+    return fig
+
+# ===============================
 # Streamlit App
 # ===============================
 st.title("🔧 Verilog Testbench Generator with Simulation & Step-by-Step Explanation")
@@ -147,11 +185,7 @@ if st.button("Generate"):
             st.dataframe(df)
 
             st.subheader("📉 Input/Output Waveforms")
-            fig, ax = plt.subplots(figsize=(10, 4))
-            for sig in waveform_df.columns:
-                ax.step(range(len(waveform_df)), waveform_df[sig], label=sig, where='mid')
-            ax.set_yticks([0, 1])
-            ax.legend()
+            fig = plot_waveforms(waveform_df)
             st.pyplot(fig)
 
             # Block diagram
