@@ -1,161 +1,131 @@
 import streamlit as st
 import google.generativeai as genai
-import matplotlib.pyplot as plt
+import os
 import itertools
 import re
-import os
-import pandas as pd
-import graphviz
-from io import BytesIO
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle, FancyArrow
 
 # -----------------------------
-# Setup Gemini API
+# CONFIG
 # -----------------------------
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
+
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-st.set_page_config(page_title="Verilog Testbench & Simulator", layout="wide")
-
-st.title("⚡ Verilog Testbench Generator & Visualizer")
+st.title("🔧 Verilog Testbench Generator with Truth Table, Waveforms & Block Diagram")
 
 # -----------------------------
-# Input Code
+# USER INPUT
 # -----------------------------
-code_input = st.text_area("Paste your Verilog code here:", height=250)
+code_input = st.text_area("Paste your Verilog module code here:", height=300)
 
 if st.button("Generate Testbench & Analysis"):
     if not code_input.strip():
-        st.warning("⚠️ Please enter Verilog code.")
+        st.error("⚠️ Please paste your Verilog code.")
     else:
-        # Detect Sequential vs Combinational
-        is_sequential = any(kw in code_input for kw in ["always", "posedge", "negedge"])
+        # -----------------------------
+        # 1. Extract Module Info
+        # -----------------------------
+        inputs = re.findall(r'input\s+([a-zA-Z0-9_]+)', code_input)
+        outputs = re.findall(r'output\s+([a-zA-Z0-9_]+)', code_input)
+
+        st.subheader("📌 Detected Ports")
+        st.write(f"**Inputs:** {inputs}")
+        st.write(f"**Outputs:** {outputs}")
 
         # -----------------------------
-        # 1. Explanation of Code
+        # 2. Generate Testbench (Gemini)
         # -----------------------------
-        try:
-            explanation = model.generate_content(
-                f"Explain the following Verilog code step by step:\n{code_input[:2000]}"
-            )
-            st.subheader("📘 Code Explanation")
-            st.write(explanation.text)
-        except Exception as e:
-            st.error(f"Error generating explanation: {e}")
-
-        # -----------------------------
-        # 2. Testbench Generation
-        # -----------------------------
-        try:
+        with st.spinner("Generating testbench..."):
             tb = model.generate_content(
-                f"Generate a Verilog testbench for the following module:\n{code_input[:2000]}"
+                f"Write a Verilog testbench for the following code:\n{code_input}"
             )
-            st.subheader("🧪 Generated Testbench")
-            st.code(tb.text, language="verilog")
-        except Exception as e:
-            st.error(f"Error generating testbench: {e}")
+        st.subheader("📝 Generated Testbench")
+        st.code(tb.text, language="verilog")
 
         # -----------------------------
-        # 3. Block Diagram (LOCAL)
+        # 3. Explain the Code (Gemini)
         # -----------------------------
-        st.subheader("📦 Block Diagram")
-        inputs = re.findall(r"input\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
-        outputs = re.findall(r"output\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
-        module_name = re.search(r"module\s+(\w+)", code_input)
-
-        dot = graphviz.Digraph()
-        if module_name:
-            dot.node("M", module_name.group(1), shape="box", style="filled", color="lightblue")
-            for inp in inputs:
-                dot.node(inp, inp, shape="circle", color="green")
-                dot.edge(inp, "M")
-            for outp in outputs:
-                dot.node(outp, outp, shape="circle", color="red")
-                dot.edge("M", outp)
-
-        st.graphviz_chart(dot)
-
-        # Export block diagram as SVG
-        try:
-            svg_data = dot.pipe(format="svg")
-            st.download_button("⬇️ Download Block Diagram (SVG)", svg_data, file_name="block_diagram.svg")
-        except Exception as e:
-            st.warning(f"Could not export block diagram: {e}")
+        with st.spinner("Explaining Verilog code..."):
+            explanation = model.generate_content(
+                f"Explain the following Verilog code in simple terms:\n{code_input}"
+            )
+        st.subheader("📖 Code Explanation")
+        st.write(explanation.text)
 
         # -----------------------------
-        # 4. Simulation / Truth Table
+        # 4. Truth Table & Waveforms
         # -----------------------------
-        if not is_sequential:
-            st.subheader("📊 Truth Table & Waveforms")
+        st.subheader("📊 Truth Table & Waveforms")
 
-            # Extract inputs and outputs
-            inputs = list(dict.fromkeys(inputs))  # remove duplicates
-            outputs = list(dict.fromkeys(outputs))
+        if inputs and outputs:
+            n_inputs = len(inputs)
+            all_combos = list(itertools.product([0, 1], repeat=n_inputs))
 
-            if inputs and outputs:
-                # Build all input combinations
-                combinations = list(itertools.product([0, 1], repeat=len(inputs)))
-                truth_data = []
+            # For now, just mark outputs as "?" (since parsing expressions is non-trivial)
+            # Later this can be extended to parse assign statements safely
+            truth_data = []
+            for combo in all_combos:
+                row = list(combo) + ["?"] * len(outputs)
+                truth_data.append(row)
 
-                for combo in combinations:
-                    combo_dict = dict(zip(inputs, combo))
+            import pandas as pd
+            df = pd.DataFrame(truth_data, columns=inputs + outputs)
+            st.write(df)
 
-                    # Ask Gemini only to evaluate outputs (short JSON)
-                    try:
-                        sim = model.generate_content(
-                            f"Given this combinational Verilog module:\n{code_input}\n"
-                            f"Inputs = {combo_dict}\n"
-                            f"Respond ONLY with output values in JSON, like {{'y':0}}"
-                        )
-                        out_dict = {}
-                        try:
-                            out_dict = eval(sim.text.strip())
-                        except:
-                            for o in outputs:
-                                out_dict[o] = "?"
-                    except:
-                        out_dict = {o: "?" for o in outputs}
+            # Waveforms: show each signal separately
+            fig, axes = plt.subplots(len(inputs) + len(outputs), 1,
+                                     figsize=(8, 1.5 * (len(inputs) + len(outputs))),
+                                     sharex=True)
 
-                    truth_data.append({**combo_dict, **out_dict})
+            time = np.arange(len(all_combos))
+            for i, sig in enumerate(inputs):
+                vals = [combo[i] for combo in all_combos]
+                axes[i].step(time, vals, where="post")
+                axes[i].set_ylabel(sig)
+                axes[i].set_ylim(-0.2, 1.2)
 
-                df = pd.DataFrame(truth_data)
-                st.dataframe(df)
+            for j, sig in enumerate(outputs):
+                vals = [0 if row[-len(outputs) + j] == "0" else 1 if row[-len(outputs) + j] == "1" else 0 for row in truth_data]
+                axes[len(inputs) + j].step(time, vals, where="post", color="red")
+                axes[len(inputs) + j].set_ylabel(sig)
+                axes[len(inputs) + j].set_ylim(-0.2, 1.2)
 
-                # Export truth table as CSV
-                csv_data = df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Download Truth Table (CSV)", csv_data, file_name="truth_table.csv")
+            plt.xlabel("Time step")
+            st.pyplot(fig)
 
-                # Plot full waveform sequence
-                fig, ax = plt.subplots(figsize=(10, 4))
-                time = list(range(len(combinations)))
-
-                # Plot inputs
-                for i, inp in enumerate(inputs):
-                    values = [row[inp] for row in truth_data]
-                    ax.step(time, [v + 2*i for v in values], where="post", label=inp)
-
-                # Plot outputs shifted higher
-                for j, outp in enumerate(outputs):
-                    values = [int(row[outp]) if str(row[outp]).isdigit() else 0 for row in truth_data]
-                    ax.step(time, [v + 2*(len(inputs)+j) for v in values], where="post", label=outp)
-
-                ax.set_yticks(range(0, 2*(len(inputs)+len(outputs)), 2))
-                ax.set_yticklabels(inputs + outputs)
-                ax.set_xlabel("Time (input sequence steps)")
-                ax.legend(loc="upper right")
-                st.pyplot(fig)
-
-                # Export waveform as PNG
-                buf = BytesIO()
-                fig.savefig(buf, format="png")
-                st.download_button("⬇️ Download Waveform (PNG)", buf.getvalue(), file_name="waveform.png")
-            else:
-                st.warning("⚠️ Could not detect input/output signals for truth table.")
         else:
-            st.subheader("⏱️ Sequential Timing Diagram")
-            try:
-                timing = model.generate_content(
-                    f"Generate a timing diagram (clock, inputs, outputs) in ASCII table format for:\n{code_input[:2000]}"
-                )
-                st.text(timing.text)
-            except Exception as e:
-                st.error(f"Error generating timing diagram: {e}")
+            st.warning("⚠️ Could not detect valid inputs/outputs for truth table & waveforms.")
+
+        # -----------------------------
+        # 5. Block Diagram (Matplotlib)
+        # -----------------------------
+        st.subheader("📐 Block Diagram")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+
+        # Draw main module box
+        ax.add_patch(Rectangle((0.3, 0.3), 0.4, 0.4, fill=None, edgecolor="black", linewidth=2))
+        ax.text(0.5, 0.5, "Module", ha="center", va="center", fontsize=12, weight="bold")
+
+        # Place inputs on left
+        for i, inp in enumerate(inputs):
+            y_pos = 0.7 - i * (0.6 / max(1, len(inputs) - 1))
+            ax.text(0.25, y_pos, inp, ha="right", va="center", fontsize=10)
+            ax.add_patch(FancyArrow(0.25, y_pos, 0.05, 0, width=0.005))
+
+        # Place outputs on right
+        for i, out in enumerate(outputs):
+            y_pos = 0.7 - i * (0.6 / max(1, len(outputs) - 1))
+            ax.text(0.75, y_pos, out, ha="left", va="center", fontsize=10)
+            ax.add_patch(FancyArrow(0.7, y_pos, 0.05, 0, width=0.005))
+
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+
+        st.pyplot(fig)
