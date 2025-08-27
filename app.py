@@ -1,158 +1,119 @@
 import streamlit as st
 import google.generativeai as genai
-import re
-import itertools
 import pandas as pd
 import matplotlib.pyplot as plt
 import networkx as nx
+import numpy as np
+import re
 
 # Configure Gemini API
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel("gemini-1.5-flash")
 
+st.title("🔧 Verilog Testbench & Analyzer")
 
-# ----------------- PARSE VERILOG -----------------
-def parse_verilog(verilog_code):
-    """Extract inputs, outputs, and assigns from combinational Verilog code."""
+code_input = st.text_area("Paste your Verilog code here:", height=300)
 
-    # 1. Find inputs
-    inputs = []
-    input_matches = re.findall(r'\binput\s+([^;]+);', verilog_code)
-    for match in input_matches:
-        signals = [sig.strip() for sig in match.replace("input", "").split(",")]
-        inputs.extend(signals)
-
-    # 2. Find outputs
-    outputs = []
-    output_matches = re.findall(r'\boutput\s+([^;]+);', verilog_code)
-    for match in output_matches:
-        signals = [sig.strip() for sig in match.replace("output", "").split(",")]
-        outputs.extend(signals)
-
-    # 3. Assign statements
-    assigns = re.findall(r'assign\s+(\w+)\s*=\s*(.+?);', verilog_code)
-
-    # Deduplicate
-    inputs = list(dict.fromkeys(inputs))
-    outputs = list(dict.fromkeys(outputs))
-
-    return inputs, outputs, assigns
-
-
-# ----------------- EVALUATE EXPRESSION -----------------
-def evaluate_expression(expr, values):
-    expr = expr.replace("&", " and ")
-    expr = expr.replace("|", " or ")
-    expr = expr.replace("~", " not ")
-    expr = expr.replace("^", " != ")
-    try:
-        return int(eval(expr, {}, values))
-    except Exception:
-        return "?"
-
-
-# ----------------- TRUTH TABLE & WAVEFORMS -----------------
-def generate_truth_table(inputs, outputs, assigns):
-    table = []
-    waveform = {sig: [] for sig in inputs + outputs}
-
-    for combo in itertools.product([0, 1], repeat=len(inputs)):
-        values = dict(zip(inputs, combo))
-
-        # compute each assign
-        for out, expr in assigns:
-            values[out] = evaluate_expression(expr, values)
-
-        row = {**values}
-        table.append(row)
-
-        for sig in waveform:
-            waveform[sig].append(values.get(sig, 0))
-
-    df = pd.DataFrame(table)
-    waveform_df = pd.DataFrame(waveform)
-
-    return df, waveform, waveform_df
-
-
-# ----------------- BLOCK DIAGRAM -----------------
-def generate_block_diagram(inputs, outputs, assigns):
-    G = nx.DiGraph()
-
-    for inp in inputs:
-        G.add_node(inp, color="lightgreen")
-
-    for out in outputs:
-        G.add_node(out, color="lightblue")
-
-    for out, expr in assigns:
-        gate_node = f"{out}_logic"
-        G.add_node(gate_node, color="orange", label=expr)
-        for inp in inputs:
-            if re.search(rf"\b{inp}\b", expr):
-                G.add_edge(inp, gate_node)
-        G.add_edge(gate_node, out)
-
-    return G
-
-
-def plot_block_diagram(G):
-    pos = nx.spring_layout(G, seed=42)
-    colors = [G.nodes[n].get("color", "gray") for n in G.nodes]
-
-    labels = {n: G.nodes[n].get("label", n) for n in G.nodes}
-
-    plt.figure(figsize=(6, 4))
-    nx.draw(G, pos, with_labels=True, labels=labels, node_color=colors,
-            node_size=1500, font_size=10, font_weight="bold", arrows=True)
-    st.pyplot(plt)
-
-
-# ----------------- STREAMLIT APP -----------------
-st.title("🔧 Verilog Testbench & Truth Table Generator")
-
-code_input = st.text_area("Enter your Verilog code:")
-
-if st.button("Generate"):
-    if not code_input.strip():
-        st.error("Please enter Verilog code.")
+if st.button("Generate Testbench & Analysis"):
+    if code_input.strip() == "":
+        st.error("Please paste some Verilog code first!")
     else:
-        inputs, outputs, assigns = parse_verilog(code_input)
+        with st.spinner("Analyzing code..."):
 
-        if not inputs or not outputs or not assigns:
-            st.error("Could not parse inputs/outputs properly. Please check your Verilog code.")
-        else:
-            st.subheader("📥 Parsed Signals")
-            st.write("**Inputs:**", inputs)
-            st.write("**Outputs:**", outputs)
-            st.write("**Assigns:**", assigns)
-
-            # Truth Table
-            df, waveform, waveform_df = generate_truth_table(inputs, outputs, assigns)
-            st.subheader("📊 Truth Table")
-            st.dataframe(df)
-
-            # Waveforms
-            st.subheader("📈 Waveforms (Inputs & Outputs)")
-            fig, ax = plt.subplots(figsize=(8, 4))
-            for i, sig in enumerate(waveform_df.columns):
-                ax.step(range(len(waveform_df)), waveform_df[sig] + 2 * i, where="post", label=sig)
-            ax.set_yticks([2 * i for i in range(len(waveform_df.columns))])
-            ax.set_yticklabels(waveform_df.columns)
-            ax.legend(loc="upper right")
-            st.pyplot(fig)
-
-            # Block Diagram
-            st.subheader("🔲 Block Diagram")
-            G = generate_block_diagram(inputs, outputs, assigns)
-            plot_block_diagram(G)
-
-            # Explanation using Gemini
+            # ---------------- EXPLANATION ----------------
+            explanation = model.generate_content(
+                f"Explain the following Verilog code in simple terms:\n{code_input}"
+            ).text
             st.subheader("📖 Code Explanation")
+            st.write(explanation)
+
+            # ---------------- TESTBENCH ----------------
+            testbench = model.generate_content(
+                f"Write a Verilog testbench for the following code:\n{code_input}"
+            ).text
+            st.subheader("🧪 Generated Testbench")
+            st.code(testbench, language="verilog")
+
+            # Save & download
+            st.download_button("⬇️ Download Testbench",
+                               testbench,
+                               file_name="generated_tb.v")
+
+            # ---------------- TRUTH TABLE + WAVEFORMS ----------------
+            st.subheader("📊 Truth Table & Waveforms")
+
+            # Parse module header for inputs & outputs
+            header_match = re.search(r"module\s+\w+\s*\((.*?)\);", code_input, re.S)
+            if header_match:
+                ports = header_match.group(1).replace("\n", "").split(",")
+                ports = [p.strip() for p in ports]
+
+                inputs = [p.split()[-1] for p in ports if "input" in p]
+                outputs = [p.split()[-1] for p in ports if "output" in p]
+
+                if inputs and outputs:
+                    n = len(inputs)
+                    rows = []
+                    waveforms = {sig: [] for sig in inputs + outputs}
+
+                    # Simulate all input combinations (brute force)
+                    for i in range(2 ** n):
+                        in_vals = [(i >> bit) & 1 for bit in range(n)]
+                        row = {inputs[j]: in_vals[j] for j in range(n)}
+
+                        # simple heuristic: check if assign matches
+                        for out in outputs:
+                            m = re.search(rf"assign\s+{out}\s*=\s*(.*?);", code_input)
+                            if m:
+                                expr = m.group(1)
+                                expr_eval = expr
+                                for j, inp in enumerate(inputs):
+                                    expr_eval = expr_eval.replace(inp, str(in_vals[j]))
+                                expr_eval = expr_eval.replace("&", " and ").replace("|", " or ").replace("~", " not ")
+                                try:
+                                    row[out] = int(eval(expr_eval))
+                                except:
+                                    row[out] = "?"
+                            else:
+                                row[out] = "?"
+
+                        rows.append(row)
+
+                        # Fill waveforms
+                        for sig in inputs:
+                            waveforms[sig].append(row[sig])
+                        for sig in outputs:
+                            waveforms[sig].append(row[sig])
+
+                    df = pd.DataFrame(rows)
+                    st.dataframe(df)
+
+                    # Plot waveforms
+                    fig, ax = plt.subplots(figsize=(8, len(waveforms)))
+                    y_offset = 0
+                    for sig, vals in waveforms.items():
+                        ax.step(range(len(vals)), [v + y_offset for v in vals], where="post", label=sig)
+                        y_offset += 2
+                    ax.set_yticks([])
+                    ax.legend(loc="upper right")
+                    st.pyplot(fig)
+
+                else:
+                    st.warning("⚠️ Could not parse inputs/outputs properly.")
+            else:
+                st.warning("⚠️ No valid module header found.")
+
+            # ---------------- BLOCK DIAGRAM ----------------
+            st.subheader("📐 Block Diagram (Basic)")
             try:
-                explanation = model.generate_content(
-                    f"Explain the following Verilog code in simple terms:\n{code_input}"
-                )
-                st.write(explanation.text)
+                G = nx.DiGraph()
+                for out in outputs:
+                    for inp in inputs:
+                        G.add_edge(inp, out)
+
+                fig, ax = plt.subplots()
+                pos = nx.spring_layout(G)
+                nx.draw(G, pos, with_labels=True, node_color="lightblue", node_size=2000, arrows=True, ax=ax)
+                st.pyplot(fig)
             except Exception as e:
-                st.error(f"Explanation could not be generated: {e}")
+                st.warning(f"Could not generate block diagram: {e}")
