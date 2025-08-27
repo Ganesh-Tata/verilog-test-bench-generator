@@ -1,69 +1,123 @@
 import streamlit as st
 import google.generativeai as genai
+import graphviz
 import os
 
-# -----------------------------
-# Configure Gemini API
-# -----------------------------
-api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
-if not api_key:
-    st.error("❌ Gemini API Key not found. Please set it in Streamlit secrets or as an environment variable.")
-else:
-    genai.configure(api_key=api_key)
+# ----------------------------
+# Setup Gemini API
+# ----------------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# -----------------------------
+# ----------------------------
+# Helper: Generate Block Diagram
+# ----------------------------
+def generate_block_diagram(verilog_code: str):
+    """Very basic parser for ports & Graphviz diagram"""
+    lines = verilog_code.splitlines()
+    module_name = "unknown_module"
+    inputs, outputs = [], []
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith("module"):
+            module_name = line.split()[1].split("(")[0]
+        elif line.startswith("input"):
+            parts = line.replace(",", " ").replace(";", " ").split()
+            inputs += [p for p in parts[1:] if p not in ["input"]]
+        elif line.startswith("output"):
+            parts = line.replace(",", " ").replace(";", " ").split()
+            outputs += [p for p in parts[1:] if p not in ["output"]]
+
+    dot = graphviz.Digraph()
+    dot.attr(rankdir="LR", size="8")
+
+    # Add module block
+    dot.node("module", module_name, shape="box", style="filled", color="lightblue")
+
+    # Add inputs
+    for inp in inputs:
+        dot.node(inp, inp, shape="ellipse", color="green")
+        dot.edge(inp, "module")
+
+    # Add outputs
+    for out in outputs:
+        dot.node(out, out, shape="ellipse", color="red")
+        dot.edge("module", out)
+
+    return dot
+
+
+# ----------------------------
+# Helper: Gemini Prompt
+# ----------------------------
+def ask_gemini(prompt: str) -> str:
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"⚠️ Error: {e}"
+
+
+# ----------------------------
 # Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="Verilog Testbench Generator", page_icon="🔧", layout="wide")
-st.title("🔧 Verilog Testbench Generator")
+# ----------------------------
+st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
+st.title("🖥️ Verilog Testbench Generator with Explanation")
 
-st.markdown("Paste your **Verilog module code** below and get an auto-generated **testbench** along with an **explanation**.")
+st.markdown("Upload or paste your **Verilog module**, and this app will:")
+st.markdown("""
+- ✅ Explain the input Verilog code  
+- ✅ Auto-generate a testbench  
+- ✅ Explain the testbench  
+- ✅ Draw a simple block diagram  
+- ✅ Allow downloading the testbench  
+""")
 
-# Input box for Verilog code
-verilog_code = st.text_area("Enter Verilog Code:", height=250, placeholder="module and_gate(...); ... endmodule")
+# Input
+verilog_code = st.text_area("Paste your Verilog code here:", height=250)
 
-if st.button("Generate Testbench"):
+if st.button("Generate Testbench & Explanation"):
     if not verilog_code.strip():
-        st.warning("⚠️ Please enter some Verilog code first.")
+        st.warning("⚠️ Please provide Verilog code first.")
     else:
-        with st.spinner("Generating testbench... ⏳"):
-            try:
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                prompt = f"""
-                You are an expert in Verilog.
-                Generate a complete Verilog testbench for the following module:
+        # --- Explanation of Input Code ---
+        with st.spinner("Explaining your Verilog code..."):
+            explanation = ask_gemini(
+                f"Explain the following Verilog code in detail:\n\n{verilog_code}"
+            )
+        st.subheader("📘 Explanation of Input Code")
+        st.write(explanation)
 
-                {verilog_code}
+        # --- Generate Testbench ---
+        with st.spinner("Generating testbench..."):
+            testbench = ask_gemini(
+                f"Write a Verilog testbench for the following module:\n\n{verilog_code}"
+            )
+        st.subheader("🧪 Generated Testbench")
+        st.code(testbench, language="verilog")
 
-                Requirements:
-                - Include `timescale` directive.
-                - Instantiate the module with correct port mapping.
-                - Provide stimulus for inputs.
-                - Add $monitor/$display for outputs.
-                - Ensure compatibility with Icarus Verilog.
-                - Also explain the testbench step by step.
-                """
+        # --- Explanation of Testbench ---
+        with st.spinner("Explaining the testbench..."):
+            tb_explanation = ask_gemini(
+                f"Explain the following Verilog testbench step by step:\n\n{testbench}"
+            )
+        st.subheader("📖 Testbench Explanation")
+        st.write(tb_explanation)
 
-                response = model.generate_content(prompt)
+        # --- Block Diagram ---
+        st.subheader("🔲 Block Diagram of Module")
+        try:
+            diagram = generate_block_diagram(verilog_code)
+            st.graphviz_chart(diagram.source)
+        except Exception as e:
+            st.error(f"Could not generate diagram: {e}")
 
-                result = response.text
-
-                # Try splitting into code + explanation
-                if "```" in result:
-                    parts = result.split("```")
-                    tb_code = parts[1].replace("verilog", "").strip()
-                    explanation = parts[-1].strip()
-                else:
-                    tb_code = result
-                    explanation = "Explanation not clearly separated. Full output shown above."
-
-                st.subheader("📜 Generated Testbench Code")
-                st.code(tb_code, language="verilog")
-
-                st.subheader("📝 Explanation")
-                st.markdown(explanation)
-
-                st.download_button("⬇️ Download Testbench", tb_code, file_name="tb_generated.v")
-
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
+        # --- Download Button ---
+        st.subheader("⬇️ Download Testbench")
+        st.download_button(
+            label="Download Testbench as .v file",
+            data=testbench,
+            file_name="generated_testbench.v",
+            mime="text/plain",
+        )
