@@ -1,131 +1,115 @@
 import streamlit as st
-import google.generativeai as genai
-import os
 import itertools
-import re
-import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle, FancyArrow
+import re
+from graphviz import Digraph
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
+# -------- Utility: parse Verilog combinational code --------
+def parse_verilog(code):
+    # Find module inputs and outputs
+    module_match = re.search(r"module\s+\w+\s*\((.*?)\);", code, re.S)
+    ports = module_match.group(1) if module_match else ""
+    inputs = re.findall(r"input\s+(\w+)", code)
+    outputs = re.findall(r"output\s+(\w+)", code)
+    assigns = re.findall(r"assign\s+(\w+)\s*=\s*(.*?);", code)
 
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+    return inputs, outputs, assigns
 
-st.title("🔧 Verilog Testbench Generator with Truth Table, Waveforms & Block Diagram")
+# -------- Utility: convert Verilog expr to Python expr --------
+def verilog_to_python(expr):
+    expr = expr.replace("&", " and ")
+    expr = expr.replace("|", " or ")
+    expr = expr.replace("^", " != ")
+    expr = re.sub(r"~(\w+)", r"(not \1)", expr)
+    return expr
 
-# -----------------------------
-# USER INPUT
-# -----------------------------
-code_input = st.text_area("Paste your Verilog module code here:", height=300)
+# -------- Truth table + waveform generation --------
+def generate_truth_table(inputs, outputs, assigns):
+    table = []
+    waveform = {sig: [] for sig in inputs + outputs}
 
-if st.button("Generate Testbench & Analysis"):
-    if not code_input.strip():
-        st.error("⚠️ Please paste your Verilog code.")
-    else:
-        # -----------------------------
-        # 1. Extract Module Info
-        # -----------------------------
-        inputs = re.findall(r'input\s+([a-zA-Z0-9_]+)', code_input)
-        outputs = re.findall(r'output\s+([a-zA-Z0-9_]+)', code_input)
+    # Build Python eval environment
+    assign_map = {out: verilog_to_python(expr) for out, expr in assigns}
+
+    for combo in itertools.product([0,1], repeat=len(inputs)):
+        env = dict(zip(inputs, combo))
+        # evaluate each assign
+        for out, expr in assign_map.items():
+            try:
+                env[out] = int(eval(expr, {}, env))
+            except Exception:
+                env[out] = "?"
+        row = [env[i] for i in inputs] + [env[o] for o in outputs]
+        table.append(row)
+
+        # fill waveform
+        for sig in inputs + outputs:
+            waveform[sig].append(env.get(sig, 0))
+
+    df = pd.DataFrame(table, columns=inputs+outputs)
+    return df, waveform
+
+# -------- Waveform plotting --------
+def plot_waveform(waveform):
+    plt.figure(figsize=(10, 5))
+    y_offset = 0
+    for sig, values in waveform.items():
+        shifted = [v + y_offset for v in values]
+        plt.step(range(len(values)), shifted, where="post", label=sig)
+        y_offset += 2
+    plt.yticks([])
+    plt.xlabel("Time steps")
+    plt.title("Input/Output Waveforms")
+    plt.legend(loc="upper right")
+    st.pyplot(plt)
+
+# -------- Block diagram with Graphviz --------
+def generate_block_diagram(inputs, outputs, assigns):
+    dot = Digraph()
+    dot.attr(rankdir="LR")
+
+    for inp in inputs:
+        dot.node(inp, shape="circle", style="filled", color="lightblue")
+
+    for out, expr in assigns:
+        gate = f"{out}_gate"
+        dot.node(gate, label=expr, shape="box", style="filled", color="lightgray")
+        for var in re.findall(r"\b\w+\b", expr):
+            if var in inputs or var in outputs:
+                dot.edge(var, gate)
+        dot.edge(gate, out)
+
+    for out in outputs:
+        dot.node(out, shape="doublecircle", style="filled", color="lightgreen")
+
+    st.graphviz_chart(dot)
+
+# -------- Streamlit UI --------
+st.title("🔧 Verilog Testbench + Logic Visualizer")
+
+code_input = st.text_area("Paste your Verilog code:", height=200)
+
+if st.button("Generate Testbench & Visuals"):
+    if code_input.strip():
+        inputs, outputs, assigns = parse_verilog(code_input)
 
         st.subheader("📌 Detected Ports")
-        st.write(f"**Inputs:** {inputs}")
-        st.write(f"**Outputs:** {outputs}")
+        st.write("Inputs:", inputs)
+        st.write("Outputs:", outputs)
 
-        # -----------------------------
-        # 2. Generate Testbench (Gemini)
-        # -----------------------------
-        with st.spinner("Generating testbench..."):
-            tb = model.generate_content(
-                f"Write a Verilog testbench for the following code:\n{code_input}"
-            )
-        st.subheader("📝 Generated Testbench")
-        st.code(tb.text, language="verilog")
-
-        # -----------------------------
-        # 3. Explain the Code (Gemini)
-        # -----------------------------
-        with st.spinner("Explaining Verilog code..."):
-            explanation = model.generate_content(
-                f"Explain the following Verilog code in simple terms:\n{code_input}"
-            )
-        st.subheader("📖 Code Explanation")
-        st.write(explanation.text)
-
-        # -----------------------------
-        # 4. Truth Table & Waveforms
-        # -----------------------------
-        st.subheader("📊 Truth Table & Waveforms")
-
-        if inputs and outputs:
-            n_inputs = len(inputs)
-            all_combos = list(itertools.product([0, 1], repeat=n_inputs))
-
-            # For now, just mark outputs as "?" (since parsing expressions is non-trivial)
-            # Later this can be extended to parse assign statements safely
-            truth_data = []
-            for combo in all_combos:
-                row = list(combo) + ["?"] * len(outputs)
-                truth_data.append(row)
-
-            import pandas as pd
-            df = pd.DataFrame(truth_data, columns=inputs + outputs)
-            st.write(df)
-
-            # Waveforms: show each signal separately
-            fig, axes = plt.subplots(len(inputs) + len(outputs), 1,
-                                     figsize=(8, 1.5 * (len(inputs) + len(outputs))),
-                                     sharex=True)
-
-            time = np.arange(len(all_combos))
-            for i, sig in enumerate(inputs):
-                vals = [combo[i] for combo in all_combos]
-                axes[i].step(time, vals, where="post")
-                axes[i].set_ylabel(sig)
-                axes[i].set_ylim(-0.2, 1.2)
-
-            for j, sig in enumerate(outputs):
-                vals = [0 if row[-len(outputs) + j] == "0" else 1 if row[-len(outputs) + j] == "1" else 0 for row in truth_data]
-                axes[len(inputs) + j].step(time, vals, where="post", color="red")
-                axes[len(inputs) + j].set_ylabel(sig)
-                axes[len(inputs) + j].set_ylim(-0.2, 1.2)
-
-            plt.xlabel("Time step")
-            st.pyplot(fig)
-
+        if not assigns:
+            st.error("No assign statements found! Only combinational logic is supported.")
         else:
-            st.warning("⚠️ Could not detect valid inputs/outputs for truth table & waveforms.")
+            st.subheader("📊 Truth Table")
+            df, waveform = generate_truth_table(inputs, outputs, assigns)
+            st.dataframe(df)
 
-        # -----------------------------
-        # 5. Block Diagram (Matplotlib)
-        # -----------------------------
-        st.subheader("📐 Block Diagram")
+            st.subheader("📈 Waveforms")
+            plot_waveform(waveform)
 
-        fig, ax = plt.subplots(figsize=(6, 4))
+            st.subheader("📐 Block Diagram")
+            generate_block_diagram(inputs, outputs, assigns)
 
-        # Draw main module box
-        ax.add_patch(Rectangle((0.3, 0.3), 0.4, 0.4, fill=None, edgecolor="black", linewidth=2))
-        ax.text(0.5, 0.5, "Module", ha="center", va="center", fontsize=12, weight="bold")
-
-        # Place inputs on left
-        for i, inp in enumerate(inputs):
-            y_pos = 0.7 - i * (0.6 / max(1, len(inputs) - 1))
-            ax.text(0.25, y_pos, inp, ha="right", va="center", fontsize=10)
-            ax.add_patch(FancyArrow(0.25, y_pos, 0.05, 0, width=0.005))
-
-        # Place outputs on right
-        for i, out in enumerate(outputs):
-            y_pos = 0.7 - i * (0.6 / max(1, len(outputs) - 1))
-            ax.text(0.75, y_pos, out, ha="left", va="center", fontsize=10)
-            ax.add_patch(FancyArrow(0.7, y_pos, 0.05, 0, width=0.005))
-
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-
-        st.pyplot(fig)
+    else:
+        st.warning("Please enter some Verilog code.")
