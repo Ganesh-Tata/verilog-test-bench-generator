@@ -1,5 +1,4 @@
 streamlit
 google-generativeai
-graphviz
 matplotlib
-fpdf
+numpy
