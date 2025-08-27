@@ -1,123 +1,133 @@
 import streamlit as st
 import google.generativeai as genai
 import graphviz
+import matplotlib.pyplot as plt
 import os
+import re
+from fpdf import FPDF
 
-# ----------------------------
-# Setup Gemini API
-# ----------------------------
+# -----------------------------
+# CONFIG
+# -----------------------------
+st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ----------------------------
-# Helper: Generate Block Diagram
-# ----------------------------
-def generate_block_diagram(verilog_code: str):
-    """Very basic parser for ports & Graphviz diagram"""
-    lines = verilog_code.splitlines()
-    module_name = "unknown_module"
-    inputs, outputs = [], []
+# -----------------------------
+# HELPER FUNCTIONS
+# -----------------------------
+def extract_ports(verilog_code):
+    """Extract input/output ports from Verilog code"""
+    ports = []
+    pattern = r"(input|output)\s+(?:\[\d+:\d+\]\s*)?(\w+)"
+    for match in re.finditer(pattern, verilog_code):
+        ports.append({"Direction": match.group(1), "Name": match.group(2)})
+    return ports
 
-    for line in lines:
-        line = line.strip()
-        if line.startswith("module"):
-            module_name = line.split()[1].split("(")[0]
-        elif line.startswith("input"):
-            parts = line.replace(",", " ").replace(";", " ").split()
-            inputs += [p for p in parts[1:] if p not in ["input"]]
-        elif line.startswith("output"):
-            parts = line.replace(",", " ").replace(";", " ").split()
-            outputs += [p for p in parts[1:] if p not in ["output"]]
+def extract_parameters(verilog_code):
+    """Extract parameter values"""
+    params = []
+    pattern = r"parameter\s+(\w+)\s*=\s*(\d+)"
+    for match in re.finditer(pattern, verilog_code):
+        params.append({"Parameter": match.group(1), "Value": match.group(2)})
+    return params
 
+def detect_fsm(verilog_code):
+    """Detect FSM from case statements"""
+    states = re.findall(r"(\w+):", verilog_code)
+    if not states:
+        return None
     dot = graphviz.Digraph()
-    dot.attr(rankdir="LR", size="8")
-
-    # Add module block
-    dot.node("module", module_name, shape="box", style="filled", color="lightblue")
-
-    # Add inputs
-    for inp in inputs:
-        dot.node(inp, inp, shape="ellipse", color="green")
-        dot.edge(inp, "module")
-
-    # Add outputs
-    for out in outputs:
-        dot.node(out, out, shape="ellipse", color="red")
-        dot.edge("module", out)
-
+    for i, state in enumerate(states):
+        dot.node(state, state, shape="circle")
+        if i < len(states) - 1:
+            dot.edge(state, states[i+1])
     return dot
 
+def plot_mock_waveform():
+    """Simple waveform for clk & reset"""
+    t = list(range(20))
+    clk = [i % 2 for i in t]
+    rst = [1 if i < 3 else 0 for i in t]
 
-# ----------------------------
-# Helper: Gemini Prompt
-# ----------------------------
-def ask_gemini(prompt: str) -> str:
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"⚠️ Error: {e}"
+    fig, ax = plt.subplots(figsize=(6, 2))
+    ax.step(t, clk, where="mid", label="clk")
+    ax.step(t, rst, where="mid", label="reset")
+    ax.set_ylim(-0.5, 1.5)
+    ax.legend()
+    ax.set_title("Mock Waveform")
+    return fig
 
+def generate_testbench(verilog_code, style="Basic"):
+    """Use Gemini to generate testbench"""
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    prompt = f"Generate a {style} testbench for the following Verilog code and explain it:\n\n{verilog_code}"
+    response = model.generate_content(prompt)
+    return response.text
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
-st.title("🖥️ Verilog Testbench Generator with Explanation")
+def save_to_pdf(verilog_code, explanation, testbench_code):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
 
-st.markdown("Upload or paste your **Verilog module**, and this app will:")
-st.markdown("""
-- ✅ Explain the input Verilog code  
-- ✅ Auto-generate a testbench  
-- ✅ Explain the testbench  
-- ✅ Draw a simple block diagram  
-- ✅ Allow downloading the testbench  
-""")
+    pdf.multi_cell(0, 10, "Verilog Testbench Generator Report\n\n")
+    pdf.multi_cell(0, 10, "Original Code:\n" + verilog_code + "\n\n")
+    pdf.multi_cell(0, 10, "Explanation:\n" + explanation + "\n\n")
+    pdf.multi_cell(0, 10, "Generated Testbench:\n" + testbench_code + "\n\n")
 
-# Input
-verilog_code = st.text_area("Paste your Verilog code here:", height=250)
+    pdf.output("verilog_report.pdf")
+    return "verilog_report.pdf"
 
-if st.button("Generate Testbench & Explanation"):
-    if not verilog_code.strip():
-        st.warning("⚠️ Please provide Verilog code first.")
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.title("⚡ Verilog Testbench Generator with AI")
+st.write("Upload or paste Verilog code to generate testbenches, diagrams, and explanations.")
+
+verilog_code = st.text_area("✍️ Enter your Verilog Code:", height=200)
+
+testbench_style = st.selectbox(
+    "Select Testbench Style",
+    ["Basic", "Self-checking", "Random stimulus"]
+)
+
+if st.button("🚀 Generate Testbench"):
+    if verilog_code.strip() == "":
+        st.warning("Please enter Verilog code first!")
     else:
-        # --- Explanation of Input Code ---
-        with st.spinner("Explaining your Verilog code..."):
-            explanation = ask_gemini(
-                f"Explain the following Verilog code in detail:\n\n{verilog_code}"
-            )
-        st.subheader("📘 Explanation of Input Code")
-        st.write(explanation)
+        # Port table
+        ports = extract_ports(verilog_code)
+        if ports:
+            st.subheader("🔌 Port Summary")
+            st.table(ports)
 
-        # --- Generate Testbench ---
-        with st.spinner("Generating testbench..."):
-            testbench = ask_gemini(
-                f"Write a Verilog testbench for the following module:\n\n{verilog_code}"
-            )
-        st.subheader("🧪 Generated Testbench")
-        st.code(testbench, language="verilog")
+        # Parameters
+        params = extract_parameters(verilog_code)
+        if params:
+            st.subheader("⚙️ Parameters")
+            st.table(params)
 
-        # --- Explanation of Testbench ---
-        with st.spinner("Explaining the testbench..."):
-            tb_explanation = ask_gemini(
-                f"Explain the following Verilog testbench step by step:\n\n{testbench}"
-            )
-        st.subheader("📖 Testbench Explanation")
-        st.write(tb_explanation)
+        # Testbench generation
+        tb_output = generate_testbench(verilog_code, testbench_style)
+        st.subheader("📝 Generated Testbench")
+        st.code(tb_output, language="verilog")
 
-        # --- Block Diagram ---
-        st.subheader("🔲 Block Diagram of Module")
-        try:
-            diagram = generate_block_diagram(verilog_code)
-            st.graphviz_chart(diagram.source)
-        except Exception as e:
-            st.error(f"Could not generate diagram: {e}")
+        # FSM diagram
+        fsm = detect_fsm(verilog_code)
+        if fsm:
+            st.subheader("🔄 FSM Diagram")
+            st.graphviz_chart(fsm)
 
-        # --- Download Button ---
-        st.subheader("⬇️ Download Testbench")
-        st.download_button(
-            label="Download Testbench as .v file",
-            data=testbench,
-            file_name="generated_testbench.v",
-            mime="text/plain",
-        )
+        # Mock waveform
+        st.subheader("📉 Mock Waveform Example")
+        st.pyplot(plot_mock_waveform())
+
+        # Explanation (from AI output)
+        st.subheader("📖 Explanation")
+        st.write(tb_output)
+
+        # Export option
+        if st.button("💾 Export Report (PDF)"):
+            pdf_file = save_to_pdf(verilog_code, tb_output, tb_output)
+            with open(pdf_file, "rb") as f:
+                st.download_button("Download PDF", f, file_name="verilog_report.pdf")
+
