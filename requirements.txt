@@ -1,6 +1,5 @@
 streamlit==1.26.0
 pandas==2.1.0
 plotly==5.16.0
-graphviz==0.22
 requests==2.32.0
 google-generativeai==0.2.0
