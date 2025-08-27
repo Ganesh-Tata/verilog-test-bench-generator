@@ -5,6 +5,8 @@ import itertools
 import re
 import os
 import pandas as pd
+import graphviz
+from io import BytesIO
 
 # -----------------------------
 # Setup Gemini API
@@ -53,17 +55,31 @@ if st.button("Generate Testbench & Analysis"):
             st.error(f"Error generating testbench: {e}")
 
         # -----------------------------
-        # 3. Block Diagram (AI-generated)
+        # 3. Block Diagram (LOCAL)
         # -----------------------------
+        st.subheader("📦 Block Diagram")
+        inputs = re.findall(r"input\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
+        outputs = re.findall(r"output\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
+        module_name = re.search(r"module\s+(\w+)", code_input)
+
+        dot = graphviz.Digraph()
+        if module_name:
+            dot.node("M", module_name.group(1), shape="box", style="filled", color="lightblue")
+            for inp in inputs:
+                dot.node(inp, inp, shape="circle", color="green")
+                dot.edge(inp, "M")
+            for outp in outputs:
+                dot.node(outp, outp, shape="circle", color="red")
+                dot.edge("M", outp)
+
+        st.graphviz_chart(dot)
+
+        # Export block diagram as SVG
         try:
-            block = model.generate_content(
-                f"Generate a simple text-based block diagram for the following Verilog module:\n{code_input[:1500]}\n"
-                f"Use only ASCII or Markdown-compatible SVG so it can be displayed directly."
-            )
-            st.subheader("📦 Block Diagram")
-            st.code(block.text, language="markdown")
+            svg_data = dot.pipe(format="svg")
+            st.download_button("⬇️ Download Block Diagram (SVG)", svg_data, file_name="block_diagram.svg")
         except Exception as e:
-            st.error(f"Error generating block diagram: {e}")
+            st.warning(f"Could not export block diagram: {e}")
 
         # -----------------------------
         # 4. Simulation / Truth Table
@@ -72,49 +88,68 @@ if st.button("Generate Testbench & Analysis"):
             st.subheader("📊 Truth Table & Waveforms")
 
             # Extract inputs and outputs
-            inputs = re.findall(r"input\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
-            outputs = re.findall(r"output\s+(?:\[\d+:\d+\]\s*)?(\w+)", code_input)
+            inputs = list(dict.fromkeys(inputs))  # remove duplicates
+            outputs = list(dict.fromkeys(outputs))
 
             if inputs and outputs:
-                # Generate input combinations
+                # Build all input combinations
                 combinations = list(itertools.product([0, 1], repeat=len(inputs)))
                 truth_data = []
 
                 for combo in combinations:
                     combo_dict = dict(zip(inputs, combo))
-                    # Let Gemini predict outputs for each combo
+
+                    # Ask Gemini only to evaluate outputs (short JSON)
                     try:
                         sim = model.generate_content(
-                            f"Given this Verilog module:\n{code_input}\n"
-                            f"Inputs: {combo_dict}\n"
-                            f"Predict the outputs."
+                            f"Given this combinational Verilog module:\n{code_input}\n"
+                            f"Inputs = {combo_dict}\n"
+                            f"Respond ONLY with output values in JSON, like {{'y':0}}"
                         )
-                        output_vals = sim.text.strip()
+                        out_dict = {}
+                        try:
+                            out_dict = eval(sim.text.strip())
+                        except:
+                            for o in outputs:
+                                out_dict[o] = "?"
                     except:
-                        output_vals = "?"
+                        out_dict = {o: "?" for o in outputs}
 
-                    truth_data.append({**combo_dict, "Outputs": output_vals})
+                    truth_data.append({**combo_dict, **out_dict})
 
                 df = pd.DataFrame(truth_data)
                 st.dataframe(df)
 
-                # Waveform plotting
-                fig, ax = plt.subplots(figsize=(8, 3))
-                time = list(range(len(combinations)))
-                for i, inp in enumerate(inputs):
-                    ax.step(time, [row[inp] for row in truth_data], label=inp, where="post")
-                # For outputs we just show as textual overlay
-                for idx, row in enumerate(truth_data):
-                    ax.text(idx, -0.5, str(row["Outputs"]), ha="center", fontsize=8)
+                # Export truth table as CSV
+                csv_data = df.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Download Truth Table (CSV)", csv_data, file_name="truth_table.csv")
 
-                ax.set_ylim(-1.5, len(inputs) + 1)
-                ax.set_yticks(range(len(inputs)))
-                ax.set_yticklabels(inputs)
-                ax.set_xlabel("Time (steps)")
-                ax.legend()
+                # Plot full waveform sequence
+                fig, ax = plt.subplots(figsize=(10, 4))
+                time = list(range(len(combinations)))
+
+                # Plot inputs
+                for i, inp in enumerate(inputs):
+                    values = [row[inp] for row in truth_data]
+                    ax.step(time, [v + 2*i for v in values], where="post", label=inp)
+
+                # Plot outputs shifted higher
+                for j, outp in enumerate(outputs):
+                    values = [int(row[outp]) if str(row[outp]).isdigit() else 0 for row in truth_data]
+                    ax.step(time, [v + 2*(len(inputs)+j) for v in values], where="post", label=outp)
+
+                ax.set_yticks(range(0, 2*(len(inputs)+len(outputs)), 2))
+                ax.set_yticklabels(inputs + outputs)
+                ax.set_xlabel("Time (input sequence steps)")
+                ax.legend(loc="upper right")
                 st.pyplot(fig)
+
+                # Export waveform as PNG
+                buf = BytesIO()
+                fig.savefig(buf, format="png")
+                st.download_button("⬇️ Download Waveform (PNG)", buf.getvalue(), file_name="waveform.png")
             else:
-                st.warning("Could not detect input/output signals for truth table.")
+                st.warning("⚠️ Could not detect input/output signals for truth table.")
         else:
             st.subheader("⏱️ Sequential Timing Diagram")
             try:
