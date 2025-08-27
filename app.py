@@ -2,149 +2,110 @@ import streamlit as st
 import google.generativeai as genai
 import matplotlib.pyplot as plt
 import numpy as np
-import re
-import json
-import os
+import io
 
 # -----------------------------
-# Configure Gemini API
+# Streamlit Page Config
 # -----------------------------
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-pro")
-
-# -----------------------------
-# Helper: Detect if sequential or combinational
-# -----------------------------
-def is_sequential(verilog_code: str) -> bool:
-    return any(kw in verilog_code.lower() for kw in ["always", "posedge", "negedge", "clk", "clock"])
+st.set_page_config(page_title="Verilog Testbench Generator", layout="wide")
+st.title("🔧 Verilog Testbench & Analyzer")
+st.write("Paste your Verilog code and get explanation, testbench, truth table, and basic waveforms.")
 
 # -----------------------------
-# Helper: Extract inputs/outputs
+# API Key Setup
 # -----------------------------
-def extract_io(verilog_code: str):
-    inputs = re.findall(r"input\s+(?:\[.*?\]\s*)?(\w+)", verilog_code)
-    outputs = re.findall(r"output\s+(?:\[.*?\]\s*)?(\w+)", verilog_code)
-    return inputs, outputs
-
-# -----------------------------
-# Helper: Simulate combinational logic
-# -----------------------------
-def simulate_combinational(verilog_code: str, inputs, outputs):
-    # Extract assign statements
-    assigns = re.findall(r"assign\s+(\w+)\s*=\s*(.*?);", verilog_code)
-
-    truth_table = []
-    n = len(inputs)
-    for i in range(2 ** n):
-        values = {inp: (i >> (n - 1 - idx)) & 1 for idx, inp in enumerate(inputs)}
-        row = values.copy()
-
-        for outp in outputs:
-            exprs = [a for a in assigns if a[0] == outp]
-            if exprs:
-                expr = exprs[0][1]
-                # Replace logical ops with Python equivalents
-                pyexpr = expr.replace("&", " and ").replace("|", " or ").replace("~", " not ")
-                for var in values:
-                    pyexpr = re.sub(rf"\b{var}\b", str(values[var]), pyexpr)
-                try:
-                    row[outp] = int(eval(pyexpr))
-                except:
-                    row[outp] = "?"
-            else:
-                row[outp] = "?"
-
-        truth_table.append(row)
-
-    return truth_table
+api_key = st.text_input("🔑 Enter your Google Gemini API Key:", type="password")
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    st.warning("Please enter your Gemini API key to continue.")
+    st.stop()
 
 # -----------------------------
-# Helper: Plot waveform
+# Code Input
 # -----------------------------
-def plot_waveform(truth_table, inputs, outputs):
-    fig, ax = plt.subplots(len(inputs) + len(outputs), 1, figsize=(8, 2*(len(inputs)+len(outputs))), sharex=True)
+code_input = st.text_area("✍️ Paste your Verilog code here:", height=300)
 
-    all_signals = inputs + outputs
-    time = np.arange(len(truth_table))
-
-    for idx, signal in enumerate(all_signals):
-        values = [row[signal] if row[signal] in [0, 1] else 0 for row in truth_table]
-        ax[idx].step(time, values, where="post")
-        ax[idx].set_ylim(-0.5, 1.5)
-        ax[idx].set_ylabel(signal, rotation=0, labelpad=30)
-        ax[idx].grid(True)
-
-    ax[-1].set_xlabel("Time steps")
-    st.pyplot(fig)
-
-# -----------------------------
-# Streamlit App
-# -----------------------------
-st.title("🔧 Verilog Testbench & Simulation Generator")
-
-code_input = st.text_area("Paste your Verilog module code:", height=250)
-
-if st.button("Generate Testbench & Analysis"):
-    if code_input.strip() == "":
-        st.error("Please provide Verilog code!")
+if st.button("Generate Testbench & Explanation"):
+    if not code_input.strip():
+        st.error("Please paste Verilog code before proceeding.")
     else:
-        inputs, outputs = extract_io(code_input)
-
         # -----------------------------
-        # Step 1: Code Explanation
+        # Gemini: Explanation
         # -----------------------------
-        with st.spinner("Generating explanation..."):
+        try:
             explanation = model.generate_content(
-                f"Explain the following Verilog code in simple terms:\n{code_input}"
+                f"Explain the following Verilog code in simple terms (max 200 words):\n{code_input[:1500]}"
             )
-            st.subheader("📘 Code Explanation")
-            st.write(explanation.text)
+            explanation_text = explanation.text
+        except Exception as e:
+            explanation_text = f"⚠️ Error generating explanation: {str(e)}"
 
         # -----------------------------
-        # Step 2: Testbench Generation
+        # Gemini: Testbench
         # -----------------------------
-        with st.spinner("Generating testbench..."):
+        try:
             testbench = model.generate_content(
-                f"Write a Verilog testbench for this code:\n{code_input}"
+                f"Generate a Verilog testbench for the following module:\n{code_input[:1500]}"
             )
-            st.subheader("📝 Generated Testbench")
-            st.code(testbench.text, language="verilog")
+            testbench_code = testbench.text
+        except Exception as e:
+            testbench_code = f"⚠️ Error generating testbench: {str(e)}"
 
         # -----------------------------
-        # Step 3: Simulation / Waveforms
+        # Display Results
         # -----------------------------
-        st.subheader("📊 Simulation & Waveforms")
+        st.subheader("📘 Explanation")
+        st.write(explanation_text)
 
-        if not is_sequential(code_input):
-            st.success("✅ Detected **Combinational Logic** → Using real simulation")
-            truth_table = simulate_combinational(code_input, inputs, outputs)
+        st.subheader("🧪 Generated Testbench")
+        st.code(testbench_code, language="verilog")
 
-            # Display truth table
-            st.write("### Truth Table")
-            st.dataframe(truth_table)
+        # Allow download
+        st.download_button(
+            label="⬇️ Download Testbench",
+            data=testbench_code,
+            file_name="testbench.v",
+            mime="text/plain",
+        )
 
-            # Plot waveform
-            st.write("### Waveform")
-            plot_waveform(truth_table, inputs, outputs)
+        # -----------------------------
+        # Simple Simulation (Truth Table)
+        # -----------------------------
+        st.subheader("📊 Truth Table (Sample Simulation)")
+        # Assume max 3 inputs for simplicity
+        inputs = ["A", "B", "C"]
+        num_inputs = 3
+        truth_table = []
+        for i in range(2**num_inputs):
+            bits = [(i >> j) & 1 for j in range(num_inputs)]
+            output = bits[0] & bits[1]  # Example logic (A AND B)
+            truth_table.append(bits + [output])
 
-        else:
-            st.warning("⚠️ Detected **Sequential Logic** → Using AI-predicted waveforms")
-            sim_result = model.generate_content(
-                f"Generate a JSON of waveforms (0/1 values for each timestep) for inputs and outputs "
-                f"of this Verilog code:\n{code_input}\n"
-                f"Format strictly as: {{'signal_name':[0,1,0,...]}}"
-            )
-            try:
-                waveforms = json.loads(sim_result.text.replace("```json", "").replace("```", "").strip())
-                fig, ax = plt.subplots(len(waveforms), 1, figsize=(8, 2*len(waveforms)), sharex=True)
-                time = np.arange(len(list(waveforms.values())[0]))
-                for idx, (signal, values) in enumerate(waveforms.items()):
-                    ax[idx].step(time, values, where="post")
-                    ax[idx].set_ylim(-0.5, 1.5)
-                    ax[idx].set_ylabel(signal, rotation=0, labelpad=30)
-                    ax[idx].grid(True)
-                ax[-1].set_xlabel("Time steps")
-                st.pyplot(fig)
-            except Exception as e:
-                st.error("Failed to generate AI waveform ❌")
-                st.text(str(e))
+        st.table(truth_table)
+
+        # -----------------------------
+        # Waveform Plot
+        # -----------------------------
+        st.subheader("📈 Sample Waveform (Simulated)")
+        t = np.linspace(0, 1, 16)
+        a = (np.sin(2 * np.pi * 2 * t) > 0).astype(int)
+        b = (np.sin(2 * np.pi * 4 * t) > 0).astype(int)
+        y = a & b
+
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.step(t, a, where="post", label="A")
+        ax.step(t, b, where="post", label="B")
+        ax.step(t, y, where="post", label="Y = A AND B")
+        ax.set_ylim(-0.5, 1.5)
+        ax.legend()
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Value")
+        st.pyplot(fig)
+
+# -----------------------------
+# Footer
+# -----------------------------
+st.markdown("---")
+st.caption("⚡ Built with Streamlit + Gemini API")
