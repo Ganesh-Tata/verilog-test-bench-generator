@@ -1,154 +1,157 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import graphviz
-import os
+from graphviz import Digraph
+import re
 import google.generativeai as genai
+import os
 
-# ----------------------------
-# Set your Gemini API Key here or as environment variable
-# ----------------------------
-API_KEY = os.getenv("GEMINI_API_KEY", "")
-genai.configure(api_key=API_KEY)
+# -----------------------------
+# Gemini API setup
+# -----------------------------
+genai.api_key = os.getenv("GEMINI_API_KEY")
 
-st.title("Verilog Testbench Generator & Waveform Viewer")
+# -----------------------------
+# Fallback explanation function
+# -----------------------------
+def fallback_explanation(verilog_code):
+    lines = verilog_code.splitlines()
+    explanation_lines = []
 
-# ----------------------------
-# User input
-# ----------------------------
-code_input = st.text_area("Enter your Verilog Code:", height=250)
+    module_match = re.search(r'module\s+([a-zA-Z0-9_]+)', verilog_code)
+    if module_match:
+        explanation_lines.append(f"This Verilog module is named '{module_match.group(1)}'.")
 
-generate_tb = st.button("Generate Testbench & Analysis")
+    inputs = re.findall(r'input\s+([a-zA-Z0-9_]+)', verilog_code)
+    if inputs:
+        explanation_lines.append(f"It has {len(inputs)} input(s): {', '.join(inputs)}.")
 
-if generate_tb and code_input.strip():
-    st.info("Processing...")
+    outputs = re.findall(r'output\s+([a-zA-Z0-9_]+)', verilog_code)
+    if outputs:
+        explanation_lines.append(f"It has {len(outputs)} output(s): {', '.join(outputs)}.")
 
-    # ----------------------------
-    # Generate explanation (fallback if API not available)
-    # ----------------------------
-    try:
-        explanation = genai.models.generate_content(
-            model="models/text-bison-001",
-            prompt=f"Explain the following Verilog code in simple terms:\n{code_input}"
-        ).content
-    except:
-        explanation = "⚠️ Gemini API not available, using fallback explanation."
-    st.subheader("Explanation")
-    st.code(explanation)
+    assigns = re.findall(r'assign\s+([a-zA-Z0-9_]+)\s*=\s*([^;]+);', verilog_code)
+    if assigns:
+        logic_desc = []
+        for out_sig, expr in assigns:
+            logic_desc.append(f"{out_sig} = {expr.strip()}")
+        explanation_lines.append("Logic assignments:\n- " + "\n- ".join(logic_desc))
 
-    # ----------------------------
-    # Parse inputs, outputs, assigns
-    # ----------------------------
-    import re
+    if not explanation_lines:
+        return "This is a Verilog module, but its inputs/outputs or logic could not be parsed."
+    return "\n".join(explanation_lines)
 
+# -----------------------------
+# Truth table generator
+# -----------------------------
+def generate_truth_table(inputs, outputs, assigns):
+    import itertools
+
+    waveform = {inp: [] for inp in inputs}
+    waveform_y = {outp: [] for outp in outputs}
+    table_rows = []
+
+    for combo in itertools.product([0,1], repeat=len(inputs)):
+        row = dict(zip(inputs, combo))
+        local_dict = row.copy()
+        for out_sig, expr in assigns:
+            try:
+                expr_eval = expr
+                for var in local_dict:
+                    expr_eval = expr_eval.replace(var, str(local_dict[var]))
+                local_dict[out_sig] = eval(expr_eval)
+            except:
+                local_dict[out_sig] = '?'
+
+        for inp in inputs:
+            waveform[inp].append(row[inp])
+        for outp in outputs:
+            waveform_y[outp].append(local_dict[outp])
+
+        table_rows.append(local_dict)
+
+    df = pd.DataFrame(table_rows)
+    waveform_df = pd.DataFrame({**waveform, **waveform_y})
+    return df, waveform, waveform_df
+
+# -----------------------------
+# Block diagram generator
+# -----------------------------
+def generate_block_diagram(inputs, outputs):
+    dot = Digraph()
+    dot.node("Module", shape="box")
+    for inp in inputs:
+        dot.node(inp, shape="circle")
+        dot.edge(inp, "Module")
+    for outp in outputs:
+        dot.node(outp, shape="circle")
+        dot.edge("Module", outp)
+    return dot
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.title("Verilog Combinational Testbench Generator")
+
+code_input = st.text_area("Enter Verilog Code", height=250)
+
+if st.button("Generate Testbench & Analysis"):
     inputs = re.findall(r'input\s+([a-zA-Z0-9_]+)', code_input)
     outputs = re.findall(r'output\s+([a-zA-Z0-9_]+)', code_input)
     assigns = re.findall(r'assign\s+([a-zA-Z0-9_]+)\s*=\s*([^;]+);', code_input)
 
-    if not inputs or not outputs:
-        st.error("⚠️ Could not parse inputs/outputs properly.")
+    if not inputs or not outputs or not assigns:
+        st.warning("⚠️ Could not parse inputs/outputs properly.")
     else:
-        st.subheader("Inputs & Outputs")
-        st.write("Inputs:", inputs)
-        st.write("Outputs:", outputs)
-
-        # ----------------------------
-        # Generate Truth Table
-        # ----------------------------
-        from itertools import product
-
-        input_combinations = list(product([0, 1], repeat=len(inputs)))
-        truth_table = []
-        waveform_dict = {sig: [] for sig in inputs + outputs}
-
-        for comb in input_combinations:
-            env = dict(zip(inputs, comb))
-            row = list(comb)
-            for out_sig, expr in assigns:
-                try:
-                    # safe eval with env
-                    val = eval(expr, {}, env)
-                    row.append(val)
-                    env[out_sig] = val
-                except:
-                    row.append("?")
-                    env[out_sig] = "?"
-            truth_table.append(row)
-            for i, val in enumerate(row):
-                waveform_dict[list(waveform_dict.keys())[i]].append(val)
-
-        df = pd.DataFrame(truth_table, columns=inputs + [o for o, _ in assigns])
+        # Truth table and waveform
+        df, waveform, waveform_df = generate_truth_table(inputs, outputs, assigns)
         st.subheader("Truth Table")
         st.dataframe(df)
 
-        # ----------------------------
-        # Waveform Plot (Step Digital)
-        # ----------------------------
-        def plot_waveforms_plotly(waveform_df):
-            fig = go.Figure()
-            n_signals = len(waveform_df.columns)
+        st.subheader("Waveform Plot")
+        fig = go.Figure()
+        for sig in waveform_df.columns:
+            fig.add_trace(go.Scatter(
+                y=waveform_df[sig],
+                name=sig,
+                mode='lines+markers'
+            ))
+        fig.update_layout(yaxis=dict(dtick=1))
+        st.plotly_chart(fig, use_container_width=True)
 
-            for idx, sig in enumerate(waveform_df.columns):
-                y_vals = waveform_df[sig].replace("?", 0).tolist()
-                x_vals = []
-                y_step = []
-                for i, val in enumerate(y_vals):
-                    x_vals.extend([i, i+1])
-                    y_step.extend([val + idx*2, val + idx*2])
-                fig.add_trace(go.Scatter(x=x_vals, y=y_step,
-                                         mode='lines', name=sig))
+        # Block diagram
+        st.subheader("Block Diagram")
+        dot = generate_block_diagram(inputs, outputs)
+        st.graphviz_chart(dot)
 
-            fig.update_layout(
-                height=150 + 50*n_signals,
-                yaxis=dict(
-                    tickvals=[i*2 + 0.5 for i in range(n_signals)],
-                    ticktext=list(waveform_df.columns)
-                ),
-                xaxis_title="Input Combination Index",
-                title="Digital Waveforms (Step-wise)",
-                showlegend=True
-            )
-            return fig
-
-        waveform_df = pd.DataFrame(waveform_dict)
-        st.subheader("Waveform Viewer")
-        fig = plot_waveforms_plotly(waveform_df)
-        st.plotly_chart(fig)
-
-        # ----------------------------
-        # Block Diagram Generation
-        # ----------------------------
-        try:
-            dot = graphviz.Digraph(comment='Block Diagram')
-            for inp in inputs:
-                dot.node(inp, shape="box")
-            for outp in [o for o, _ in assigns]:
-                dot.node(outp, shape="ellipse")
-            for outp, expr in assigns:
-                expr_inputs = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', expr)
-                for ei in expr_inputs:
-                    if ei in inputs:
-                        dot.edge(ei, outp)
-            st.subheader("Block Diagram")
-            st.graphviz_chart(dot)
-        except:
-            st.error("⚠️ Could not generate block diagram. Ensure Graphviz executables are installed.")
-
-        # ----------------------------
-        # Testbench Generation (Simple)
-        # ----------------------------
-        tb_lines = ["`timescale 1ns / 1ps", f"module tb;"]
-        for inp in inputs:
-            tb_lines.append(f"reg {inp};")
-        for outp in [o for o, _ in assigns]:
-            tb_lines.append(f"wire {outp};")
-        tb_lines.append(f"{re.findall(r'module\s+([a-zA-Z0-9_]+)', code_input)[0]} uut (.*);")
-        tb_lines.append("initial begin")
-        for i, comb in enumerate(input_combinations):
-            assign_str = " ".join([f"{inp}={v};" for inp, v in zip(inputs, comb)])
-            tb_lines.append(f"#10 {assign_str}")
-        tb_lines.append("end")
-        tb_lines.append("endmodule")
+        # Testbench generation
         st.subheader("Generated Testbench")
-        st.code("\n".join(tb_lines))
+        testbench_lines = ["`timescale 1ns / 1ps", "module tb;"]
+        for inp in inputs:
+            testbench_lines.append(f"reg {inp};")
+        for outp in outputs:
+            testbench_lines.append(f"wire {outp};")
+        module_match = re.search(r'module\s+([a-zA-Z0-9_]+)', code_input)
+        if module_match:
+            module_name = module_match.group(1)
+            testbench_lines.append(f"{module_name} uut (.*);")
+        testbench_lines.append("initial begin")
+        import itertools
+        for combo in itertools.product([0,1], repeat=len(inputs)):
+            assign_lines = " ".join([f"{inp}={val};" for inp, val in zip(inputs, combo)])
+            testbench_lines.append(f"#10 {assign_lines}")
+        testbench_lines.append("end")
+        testbench_lines.append("endmodule")
+        st.code("\n".join(testbench_lines), language='verilog')
 
+        # Explanation (fallback only, suppress Gemini warning)
+        try:
+            explanation = genai.models.generate_content(
+                model="models/text-bison-001",
+                prompt=f"Explain the following Verilog code in simple terms:\n{code_input}"
+            ).content
+        except:
+            explanation = fallback_explanation(code_input)
+
+        st.subheader("Explanation")
+        st.text(explanation)
