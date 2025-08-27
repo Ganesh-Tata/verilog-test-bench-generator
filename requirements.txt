@@ -2,3 +2,5 @@ streamlit
 google-generativeai
 matplotlib
 numpy
+pandas
+graphviz
